@@ -1,7 +1,8 @@
 [package]
-name = "scratch_docker"
+name = "woody"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 libc = "0.2"
+nix = "0.23"
