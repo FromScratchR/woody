@@ -1,41 +1,72 @@
-use std::{os::unix::fs, process::{Command, Stdio}};
+use std::{path::Path, process::{Command, Stdio}};
+use nix::{sched::{clone, unshare, CloneFlags}, sys::wait::WaitPidFlag, unistd::chdir};
+use nix::unistd::{chroot, fork, ForkResult};
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Usage: {} <chroot_dir> <command> [args...]", args[0]);
-        return;
-    }
+    // let args: Vec<String> = std::env::args().collect();
+    // if args.len() < 2 {
+    //     eprintln!("Usage: {} <command> [args...]", &args[0]);
+    //     return;
+    // }
 
-    let chroot_dir = &args[1];
-    let command = &args[2];
-    let command_args = &args[3..];
+    // let flags = CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNET;
+    let flags = CloneFlags::CLONE_NEWPID;
+    let mut child_stack = [0; 4096];
 
-    // Set dummy contaner's root dir
+    let child_fn = || -> isize {
+        println!("On child_process!! PID: {}", std::process::id());
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        0
+    };
+
+    match clone(Box::new(child_fn), &mut child_stack, flags, None) {
+        Ok(pid) => {
+            println!("From Parent: Child created! PID: {}", pid);
+                match nix::sys::wait::waitpid(pid, None) {
+                    Ok(status) => println!("Child exited with status: {:?}", status),
+                    Err(e) => eprintln!("Waitipid failed: {}", e)
+                }
+        }
+        Err(e) => eprintln!("clone failed: {}, ", e)
+    };
+
+    // let pid = clone(Box::new(child_fn), &mut child_stack, flags, None).expect("Could not start new process");
+    // dbg!(&pid);
+    // nix::sys::wait::waitpid(pid, None).expect("failed waitpid");
+}
+
+fn children(args: &[String]) {
+    println!("On child process!! PID: {}", nix::unistd::getpid());
+
+    nix::unistd::sethostname("woody_container").expect("Could not define hostname namespace");
+
     let root_dir = "/tmp/woody_root";
     if !std::path::Path::new(root_dir).exists() {
-        std::fs::create_dir(root_dir).expect("Failed to create root dir.");
+        std::fs::create_dir_all(root_dir).expect("Could not create root dir.")
     }
 
-    let command_path = format!("{}/{}", root_dir, command);
-    // Copy commands into the new root dir
-    std::fs::copy(format!("/bin/{}", command), &command_path) .expect("Failed to copy command.");
+    let command = &args[0];
+    let command_path = format!("{}/bin", root_dir);
 
-    // Change root directory
-    fs::chroot(root_dir).expect("chroot failed.");
+    std::fs::create_dir_all(&command_path).expect("Could not create command dir");
+    std::fs::copy(format!("/bin/{}", command), format!("{}/{}", command_path, command))
+        .expect("Could copy command");
 
-    // Change cwd to new root dir
-    std::env::set_current_dir("/").expect("Failed to change directory.");
+    chroot(root_dir).expect("Could not chroot *root_dir*");
+    chdir("/").expect("Could not change cwd");
 
-    // Execute command
-    let mut child = Command::new(command)
-        .args(command_args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+    nix::mount::mount::<_, _, _, _>(
+        Some("proc"),
+        "/proc",
+        Some("proc"),
+        nix::mount::MsFlags::empty(),
+        Some(""),
+    ).expect("Could not mount /proc");
+
+    let mut children = Command::new(format!("/bin/{}", command))
+        .args(&args[1..])
         .spawn()
-        .expect("Could not execute command.");
+        .expect("Could not find create child proccess");
 
-    // Command result
-    child.wait().expect("Command was not successfully executed.");
+    children.wait().expect("Could not exec command");
 }
