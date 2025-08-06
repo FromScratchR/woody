@@ -1,14 +1,57 @@
 use nix::{sched::{unshare, CloneFlags}};
 use nix::unistd::{fork, ForkResult};
+use std::io::{Write};
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} <command> [args...]", &args[0]);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // let args: Vec<String> = std::env::args().collect();
+    // if args.len() < 2 {
+    //     eprintln!("Usage: {} <command> [args...]", &args[0]);
+    //     return;
+    // }
+    //
 
-        return;
+    daemonize()?;
+
+    loop {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/rust_daemon.log")?;
+
+        let timestamp = std::time::SystemTime::now();
+        writeln!(file, "[{:?}] Daemon is running, PID: {}", timestamp, std::process::id())?;
+
+        std::thread::sleep(std::time::Duration::from_secs(5))
+    }
+}
+
+fn daemonize() -> Result<(), Box<dyn std::error::Error>> {
+    match unsafe { libc::fork() } {
+        -1 => return Err("Failed to fork".into()),
+        0 => {
+            /* child process exec point */
+        },
+        _ => {
+            std::process::exit(0);
+        }
     }
 
+    if unsafe { libc::setsid() } == -1 {
+        return Err("Failed to create new session".into())
+    }
+
+    std::env::set_current_dir("/")?;
+
+    unsafe {
+        libc::close(0); // stdin
+        libc::close(1); // stdout
+        libc::close(2); // stderr
+    }
+
+    Ok(())
+}
+
+fn init_handler(args: &[String]) {
     // Get 2 fork results by waiting child and callbacking handler fn on child process itself
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child, .. }) => {
@@ -39,6 +82,5 @@ fn setup_manager(_args: &[String]) {
         Ok(ForkResult::Child) => {
             println!("[Child {}] Success init.", std::process::id())
         }
-        Err(e) => eprintln!("[Container Manager] Fork failed: {}", e)
-    }
+        Err(e) => eprintln!("[Container Manager] Fork failed: {}", e) }
 }
