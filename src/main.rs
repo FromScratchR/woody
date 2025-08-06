@@ -1,72 +1,44 @@
-use std::{path::Path, process::{Command, Stdio}};
-use nix::{sched::{clone, unshare, CloneFlags}, sys::wait::WaitPidFlag, unistd::chdir};
-use nix::unistd::{chroot, fork, ForkResult};
+use nix::{sched::{unshare, CloneFlags}};
+use nix::unistd::{fork, ForkResult};
 
 fn main() {
-    // let args: Vec<String> = std::env::args().collect();
-    // if args.len() < 2 {
-    //     eprintln!("Usage: {} <command> [args...]", &args[0]);
-    //     return;
-    // }
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <command> [args...]", &args[0]);
 
-    // let flags = CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNET;
-    let flags = CloneFlags::CLONE_NEWPID;
-    let mut child_stack = [0; 4096];
-
-    let child_fn = || -> isize {
-        println!("On child_process!! PID: {}", std::process::id());
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        0
-    };
-
-    match clone(Box::new(child_fn), &mut child_stack, flags, None) {
-        Ok(pid) => {
-            println!("From Parent: Child created! PID: {}", pid);
-                match nix::sys::wait::waitpid(pid, None) {
-                    Ok(status) => println!("Child exited with status: {:?}", status),
-                    Err(e) => eprintln!("Waitipid failed: {}", e)
-                }
-        }
-        Err(e) => eprintln!("clone failed: {}, ", e)
-    };
-
-    // let pid = clone(Box::new(child_fn), &mut child_stack, flags, None).expect("Could not start new process");
-    // dbg!(&pid);
-    // nix::sys::wait::waitpid(pid, None).expect("failed waitpid");
-}
-
-fn children(args: &[String]) {
-    println!("On child process!! PID: {}", nix::unistd::getpid());
-
-    nix::unistd::sethostname("woody_container").expect("Could not define hostname namespace");
-
-    let root_dir = "/tmp/woody_root";
-    if !std::path::Path::new(root_dir).exists() {
-        std::fs::create_dir_all(root_dir).expect("Could not create root dir.")
+        return;
     }
 
-    let command = &args[0];
-    let command_path = format!("{}/bin", root_dir);
+    // Get 2 fork results by waiting child and callbacking handler fn on child process itself
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child, .. }) => {
+            println!("[Main] Container process created with PID: {}", child);
 
-    std::fs::create_dir_all(&command_path).expect("Could not create command dir");
-    std::fs::copy(format!("/bin/{}", command), format!("{}/{}", command_path, command))
-        .expect("Could copy command");
+            match nix::sys::wait::waitpid(child, None) {
+                Ok(status) => println!("[Parent]: Container precess exited with status: {:?}", status),
+                Err(e) => eprintln!("[Parent] waitpid failed: {}", e)
+            }
+        }
+        Ok(ForkResult::Child) => {
+            setup_manager(&args[1..])
+        }
+        Err(e) => eprintln!("Could not fork: {}", e)
+    }
+}
 
-    chroot(root_dir).expect("Could not chroot *root_dir*");
-    chdir("/").expect("Could not change cwd");
+fn setup_manager(_args: &[String]) {
+    println!("[Container Manager] Setting up container for PID: {}", std::process::id());
 
-    nix::mount::mount::<_, _, _, _>(
-        Some("proc"),
-        "/proc",
-        Some("proc"),
-        nix::mount::MsFlags::empty(),
-        Some(""),
-    ).expect("Could not mount /proc");
+    let flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWUTS;
+    unshare(flags).expect("Could not unshare namespaces");
 
-    let mut children = Command::new(format!("/bin/{}", command))
-        .args(&args[1..])
-        .spawn()
-        .expect("Could not find create child proccess");
-
-    children.wait().expect("Could not exec command");
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child, .. }) => {
+            nix::sys::wait::waitpid(child, None).expect("waitpid on grandchild failed");
+        }
+        Ok(ForkResult::Child) => {
+            println!("SUCCESS! Child created")
+        }
+        Err(e) => eprintln!("[Container Manager] Fork failed {}", e)
+    }
 }
