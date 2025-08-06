@@ -34,11 +34,11 @@ fn setup_manager(_args: &[String]) {
 
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child, .. }) => {
-            nix::sys::wait::waitpid(child, None).expect("waitpid on grandchild failed");
+            nix::sys::wait::waitpid(child, None).expect("waitpid on grandchild failed.");
         }
         Ok(ForkResult::Child) => {
-            println!("SUCCESS! Child created")
+            println!("[Child {}] Success init.", std::process::id())
         }
-        Err(e) => eprintln!("[Container Manager] Fork failed {}", e)
+        Err(e) => eprintln!("[Container Manager] Fork failed: {}", e)
     }
 }
