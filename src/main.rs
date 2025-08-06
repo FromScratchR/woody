@@ -3,13 +3,6 @@ use nix::unistd::{fork, ForkResult};
 use std::io::{Write};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // let args: Vec<String> = std::env::args().collect();
-    // if args.len() < 2 {
-    //     eprintln!("Usage: {} <command> [args...]", &args[0]);
-    //     return;
-    // }
-    //
-
     daemonize()?;
 
     loop {
@@ -28,27 +21,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn daemonize() -> Result<(), Box<dyn std::error::Error>> {
     match unsafe { libc::fork() } {
         -1 => return Err("Failed to fork".into()),
+        /* child process exec point */
         0 => {
-            /* child process exec point */
+            if unsafe { libc::setsid() } == -1 {
+                return Err("Failed to create new session".into())
+            }
+
+            std::env::set_current_dir("/")?;
+
+            unsafe {
+
+                libc::close(0); // stdin
+                libc::close(1); // stdout
+                libc::close(2); // stderr
+            }
+
+            Ok(())
         },
         _ => {
+            println!("closed by exit!!");
             std::process::exit(0);
         }
     }
-
-    if unsafe { libc::setsid() } == -1 {
-        return Err("Failed to create new session".into())
-    }
-
-    std::env::set_current_dir("/")?;
-
-    unsafe {
-        libc::close(0); // stdin
-        libc::close(1); // stdout
-        libc::close(2); // stderr
-    }
-
-    Ok(())
 }
 
 fn init_handler(args: &[String]) {
