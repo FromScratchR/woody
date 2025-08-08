@@ -8,7 +8,7 @@ fn main() {
     let config = ContainerConfig {
         command: vec!["/bin/ls".to_string()],
         args: vec!["-la".to_string()],
-        rootfs: "~/Progs/woody/container/".to_string(),
+        rootfs: "./container/".to_string(),
     };
 
     let container = Container::new(config);
