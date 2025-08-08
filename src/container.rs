@@ -45,14 +45,14 @@ impl Container {
                                 | CloneFlags::CLONE_NEWIPC
                                 | CloneFlags::CLONE_NEWNET;
 
-        /* apply process isolation */
+        /* apply parent process unbound */
         nix::sched::unshare(flags)?;
 
         /* mount fs */
-        self.setup_filesystem()?;
+        self.setup_filesystem().expect("Could not setup fs");
 
         /* define hostname */
-        self.setup_hostname()?;
+        self.setup_hostname().expect("Could not set hostname");
 
         Ok(())
     }
@@ -60,36 +60,28 @@ impl Container {
 
     fn setup_filesystem(&self) -> ActionResult {
         use nix::mount::{mount, MsFlags};
-        use nix::unistd::chroot;
         use std::path::Path;
-
-        /* Mount base current root fs and container fs to process filesys */
-        mount(
-            Some("none"),
-            "/",
-            Some(""),
-            MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-            Some("")
-        )?;
 
         /* mount new fs */
         let rootfs = Path::new(&self.config.rootfs);
-
-        mount(
-            Some(rootfs),
-            rootfs,
-            Some(""),
-            MsFlags::MS_BIND | MsFlags::MS_REC,
-            Some("")
-        )?;
-
-        /* chroot to new created fs */
+        std::fs::create_dir_all(rootfs)?;
         std::env::set_current_dir(rootfs)?;
-        chroot(".")?;
-        std::env::set_current_dir("/")?;
+        dbg!(std::env::current_dir()?);
 
         /* mount essential fs */
-        self.mount_essential_fs()?;
+        self.mount_essential_fs();
+
+        /* Mount base current root fs and container fs to process filesys */
+        mount(
+            None::<&str>,
+            "/",
+            None::<&str>,
+            MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+            None::<&str>
+        )?;
+
+        /* bind process' vision of OS */
+        nix::unistd::chroot(".")?;
 
         Ok(())
     }
@@ -111,37 +103,53 @@ impl Container {
         Ok(())
     }
 
-
-    /// Works with / rootfs in order to create essential folders n mounts
-    ///
-    fn mount_essential_fs(&self) -> ActionResult {
+    fn mount_essential_fs(&self) {
         use nix::mount::{mount, MsFlags};
         use std::fs::{create_dir_all as cd};
 
-        /* create dir if they do not exist */
-        cd("/proc")?;
-        cd("/sys")?;
-        cd("/dev")?;
-        cd("/tmp")?;
+        let rootfs = std::path::Path::new(&self.config.rootfs);
+        let dirs: Vec<&str> = vec!["/proc", "/sys", "/dev", "/tmp"];
 
-        /* mount sysfs */
+        /* create dir if they do not exist */
+        dirs.iter().for_each(|dir| cd(rootfs.join(dir)).expect("Could not create essential dir [{dir}]"));
+
+        dbg!(rootfs.join(dirs[0]));
+        dbg!(std::path::Path::exists(std::path::Path::new("./proc")));
+
+        // proc
+        mount(
+            Some("procs"),
+            "/proc",
+            Some("proc"),
+            MsFlags::empty(),
+            None::<&str>
+        ).expect("Could not mount proc");
+
+        // sys
         mount(
             Some("sysfs"),
             "/sys",
             Some("sysfs"),
-            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_RDONLY,
-            Some("")
-        )?;
+            MsFlags::MS_BIND,
+            None::<&str>
+        ).expect("Could not mount sys");
 
-        /* mount working fs */
+        // dev
+        mount(
+            None::<&str>,
+            "/dev",
+            Some("devpts"),
+            MsFlags::empty(),
+            None::<&str>
+        ).expect("Could not mount dev");
+
+        // tmp
         mount(
             Some("tmpfs"),
             "/tmp",
             Some("tmpfs"),
-            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+            MsFlags::empty(),
             Some("size=64m")
-        )?;
-
-        Ok(())
+        ).expect("Could not mount tmp");
     }
 }
