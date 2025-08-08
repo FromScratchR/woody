@@ -39,6 +39,7 @@ fn daemonize() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         },
         _ => {
+            /* Kill main process which acts just like a replicator */
             println!("closed by exit!!");
             std::process::exit(0);
         }
