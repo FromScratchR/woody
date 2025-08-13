@@ -114,19 +114,31 @@ impl Container {
         use nix::mount::{mount, MsFlags};
         use std::fs::{create_dir_all as cd};
 
-        let rootfs = std::path::Path::new(&self.config.rootfs);
-        let dirs: Vec<&str> = vec!["/proc", "/sys", "/dev", "/tmp"];
-
+        
         /* create dir if they do not exist */
-        dirs.iter().for_each(|dir| cd(rootfs.join(dir)).expect("Could not create essential dir [{dir}]"));
+        let dirs: Vec<&str> = vec![
+            "./proc",
+            "./sys",
+            "./dev",
+            "./tmp",
+            "./bin",
+            "./usr/bin",
+            "./usr/lib",
+            "./usr/lib64",
+            "./lib",
+            "./lib64",
+        ];
 
-        dbg!(rootfs.join(dirs[0]));
-        dbg!(std::path::Path::exists(std::path::Path::new("./proc")));
+        for dir in dirs {
+            cd(dir).expect("Could not create essential dir [{dir}]");
+        };
+
+        let mount_flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
 
         // proc
         mount(
-            Some("procs"),
-            "/proc",
+            None::<&str>,
+            "./proc",
             Some("proc"),
             MsFlags::empty(),
             None::<&str>
@@ -134,29 +146,105 @@ impl Container {
 
         // sys
         mount(
+            None::<&str>,
+            "./sys",
             Some("sysfs"),
-            "/sys",
-            Some("sysfs"),
-            MsFlags::MS_BIND,
+            MsFlags::empty(),
             None::<&str>
         ).expect("Could not mount sys");
 
         // dev
         mount(
             None::<&str>,
-            "/dev",
-            Some("devpts"),
+            "./dev",
+            Some("tmpfs"),
             MsFlags::empty(),
-            None::<&str>
+            Some("mode=0755,size=65536k")
         ).expect("Could not mount dev");
 
         // tmp
         mount(
-            Some("tmpfs"),
-            "/tmp",
+            None::<&str>,
+            "./tmp",
             Some("tmpfs"),
             MsFlags::empty(),
-            Some("size=64m")
+            None::<&str> // Some("size=64m")
         ).expect("Could not mount tmp");
+
+        // bin
+        mount(
+            Some("/bin"),
+            "./bin",
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>
+        ).expect("Could not mount bin");
+
+        // Bind mount /usr/bin
+        mount(
+            Some("/usr/bin"),
+            "./usr/bin",
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>
+        ).expect("Could not mount usr/bin");
+
+        // Bind mount /lib and /lib64 for shared libraries
+        mount(
+            Some("/lib"),
+            "./lib",
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>
+        ).expect("Could not mount lib");
+
+        mount(
+            Some("/lib64"),
+            "./lib64",
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>
+        ).expect("Could not mount lib64");
+
+        mount(
+            Some("/usr/lib"),
+            "./usr/lib",
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>
+        ).expect("Could not mount usr/lib");
+
+        mount(
+            Some("/usr/lib64"),
+            "./usr/lib64",
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>
+        ).expect("Could not mount usr/lib64");
+
+        let dev_internals = vec!["./dev/pts", "./dev/shm"];
+        dev_internals
+            .iter()
+            .for_each(|dir|
+                cd(dir).expect("Could not create dev internals")
+            );
+
+        // dev/pts - For pseudo-terminals (like the shell)
+        mount(
+            None::<&str>,
+            "./dev/pts",
+            Some("devpts"),
+            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+            Some("newinstance,ptmxmode=0666,gid=5")
+        ).expect("Could not mount dev/pts");
+        
+        // dev/shm - Crucial for POSIX shared memory
+        mount(
+            None::<&str>,
+            "./dev/shm",
+            Some("tmpfs"),
+            MsFlags::empty(), // Add NOEXEC for security
+            Some("mode=1777") // 64M size limit
+        ).expect("Could not mount /dev/shm tmpfs");
     }
 }
