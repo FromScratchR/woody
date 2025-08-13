@@ -27,8 +27,9 @@ impl Container {
                 nix::sys::wait::waitpid(child, None).expect("Error waiting for child");
             }
             ForkResult::Child => {
-                self.setup_container().expect("Could not setup container");
-                self.exec_command().expect("Could not exec command");
+                self.setup_container();
+                self.exec_command();
+                std::process::exit(0);
             }
         }
     }
@@ -92,15 +93,19 @@ impl Container {
         Ok(())
     }
 
-    fn exec_command(&self) -> ActionResult {
-        let program = CString::new(self.config.command[0].clone())?;
-        let args: Result<Vec<CString>, _> = self.config.args
+    fn exec_command(&self) {
+        let program = CString::new(self.config.command[0].clone()).unwrap();
+        let mut args: Vec<CString> = vec![program.clone()]; 
+
+        let additional_args: Vec<CString> = self.config.args
             .iter()
-            .map(|arg| CString::new(arg.clone()))
+            .map(|arg| CString::new(arg.clone()).unwrap())
             .collect();
 
-        nix::unistd::execv(&program, &args?)?;
-        Ok(())
+        args.extend(additional_args);
+
+        println!("[Container] Executing internal command...");
+        nix::unistd::execv(&program, &args).expect("Could not execve");
     }
 
     fn mount_essential_fs(&self) {
