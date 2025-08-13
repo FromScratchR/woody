@@ -38,7 +38,7 @@ impl Container {
 impl Container {
     /// Unshare, setup fs and hostname for newly decoupled process
     ///
-    fn setup_container(&self) -> ActionResult {
+    fn setup_container(&self) {
         /* ensure new process is completely isolated */
         let flags = CloneFlags::CLONE_NEWPID
                                 | CloneFlags::CLONE_NEWNS
@@ -47,15 +47,13 @@ impl Container {
                                 | CloneFlags::CLONE_NEWNET;
 
         /* apply parent process unbound */
-        nix::sched::unshare(flags)?;
+        nix::sched::unshare(flags).expect("Could not unshare container process");
 
         /* mount fs */
         self.setup_filesystem().expect("Could not setup fs");
 
         /* define hostname */
         self.setup_hostname().expect("Could not set hostname");
-
-        Ok(())
     }
 
 
@@ -65,24 +63,28 @@ impl Container {
 
         /* mount new fs */
         let rootfs = Path::new(&self.config.rootfs);
+
         std::fs::create_dir_all(rootfs)?;
         std::env::set_current_dir(rootfs)?;
-        dbg!(std::env::current_dir()?);
+
+        println!("Initializing container on: {:?}", std::env::current_dir().unwrap());
 
         /* mount essential fs */
         self.mount_essential_fs();
+        println!("[Container]: Success on fs mount");
 
         /* Mount base current root fs and container fs to process filesys */
-        mount(
-            None::<&str>,
-            "/",
-            None::<&str>,
-            MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-            None::<&str>
-        )?;
+        // mount(
+        //     None::<&str>,
+        //     ".",
+        //     None::<&str>,
+        //     MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        //     None::<&str>
+        // ).expect("Could not mount base filesys");
 
         /* bind process' vision of OS */
         nix::unistd::chroot(".")?;
+        println!("[Container]: Changed root");
 
         Ok(())
     }
