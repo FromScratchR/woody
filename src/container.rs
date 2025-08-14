@@ -1,6 +1,6 @@
 use std::ffi::CString;
 
-use nix::{sched::CloneFlags, unistd::ForkResult};
+use nix::{sched::CloneFlags, sys::stat::{mknod, Mode, SFlag}, unistd::ForkResult};
 use crate::{cgroups::{CgroupManager}, ActionResult};
 
 #[derive(Debug)]
@@ -50,10 +50,6 @@ impl Container {
                 nix::sys::wait::waitpid(child, None).expect("Error waiting for child");
             }
             ForkResult::Child => {
-                // let cgroups = CgroupManager::new(&std::process::id().to_string());
-                // cgroups.create().expect("Could not create Cgroup folder");
-                // cgroups.set_memory_limit(50000).expect("Could not set mem_limit");
-                // std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", "+pids +memory").expect("Failed to create subtree_control");
                  let pid = nix::unistd::getpid();
                 println!("[Child] My PID is {}. Adding myself to the cgroup.", pid);
                 cgroups.add_process(pid).expect("Child failed to join cgroup");
@@ -270,5 +266,38 @@ impl Container {
             MsFlags::empty(), // Add NOEXEC for security
             Some("mode=1777") // 64M size limit
         ).expect("Could not mount /dev/shm tmpfs");
+
+        // /dev/null: The black hole.
+        // Major: 1, Minor: 3
+        mknod(
+            "/dev/null",
+            SFlag::S_IFCHR, // S_IFCHR indicates a character device
+            Mode::from_bits(0o666).unwrap(),
+            nix::sys::stat::makedev(1, 3),
+        ).expect("z");
+
+        // /dev/zero: Provides an infinite stream of null bytes.
+        // Major: 1, Minor: 5
+        mknod(
+            "/dev/zero",
+            SFlag::S_IFCHR,
+            Mode::from_bits(0o666).unwrap(),
+            nix::sys::stat::makedev(1, 5),
+        ).expect("N");
+
+        // /dev/tty: The process's controlling terminal.
+        // Major: 5, Minor: 0
+        mknod(
+            "/dev/tty",
+            SFlag::S_IFCHR,
+            Mode::from_bits(0o666).unwrap(),
+            nix::sys::stat::makedev(5, 0),
+        ).expect("m");
+
+        // /dev/random and /dev/urandom
+        mknod("/dev/random", SFlag::S_IFCHR, Mode::from_bits(0o666).unwrap(), nix::sys::stat::makedev(1, 8)).expect("n");
+        mknod("/dev/urandom", SFlag::S_IFCHR, Mode::from_bits(0o666).unwrap(), nix::sys::stat::makedev(1, 9)).expect("u");
+        
+        println!("[Child] Device nodes created.");
     }
 }
