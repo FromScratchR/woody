@@ -1,7 +1,7 @@
 use std::ffi::CString;
 
 use nix::{sched::CloneFlags, unistd::ForkResult};
-use crate::ActionResult;
+use crate::{cgroups::{CgroupManager}, ActionResult};
 
 #[derive(Debug)]
 pub struct ContainerConfig {
@@ -22,11 +22,45 @@ impl Container {
     /// Create child container proccess
     ///
     pub fn run(&self) {
+        // 1. SETUP CGROUP (IN PARENT, BEFORE FORK)
+        // Use a unique ID for the container, e.g., a UUID or a name.
+        let container_id = "container-123";
+        let cgroups = CgroupManager::new(container_id);
+
+        // Create the parent cgroup directory and enable controllers first.
+        // These might fail if they already exist, so you might want to handle that.
+        std::fs::create_dir_all("/sys/fs/cgroup/woody").ok();
+        cgroups.enable_controllers().expect("Failed to enable cgroup controllers");
+
+        // Now create the container-specific cgroup and set its limits.
+        cgroups.create().expect("Could not create Cgroup folder");
+        println!("[Parent] Cgroup created at: {}", cgroups.cgroup_path);
+
+        // Set a 50MB memory limit and 100 process limit
+        cgroups.set_memory_limit(50 * 1024 * 1024).expect("Could not set memory_limit");
+        cgroups.set_pid_limit(100).expect("Could not set pid_limit");
+        println!("[Parent] Cgroup limits set.");
+
         match unsafe { nix::unistd::fork().expect("Error forking new child process") } {
             ForkResult::Parent { child } => {
+                let cgroups = CgroupManager::new(&std::process::id().to_string());
+                cgroups.create().expect("Could not create Cgroup folder");
+                cgroups.set_memory_limit(200).expect("Could not set mem_limit");
+
                 nix::sys::wait::waitpid(child, None).expect("Error waiting for child");
             }
             ForkResult::Child => {
+                // let cgroups = CgroupManager::new(&std::process::id().to_string());
+                // cgroups.create().expect("Could not create Cgroup folder");
+                // cgroups.set_memory_limit(50000).expect("Could not set mem_limit");
+                // std::fs::write("/sys/fs/cgroup/cgroup.subtree_control", "+pids +memory").expect("Failed to create subtree_control");
+                 let pid = nix::unistd::getpid();
+                println!("[Child] My PID is {}. Adding myself to the cgroup.", pid);
+                cgroups.add_process(pid).expect("Child failed to join cgroup");
+
+                // 4. CHILD CONTINUES SETUP AND EXECUTES COMMAND
+                println!("[Child] Cgroup joined. Setting up container environment...");
+
                 self.setup_container();
                 self.exec_command();
                 std::process::exit(0);
@@ -58,7 +92,6 @@ impl Container {
 
 
     fn setup_filesystem(&self) -> ActionResult {
-        use nix::mount::{mount, MsFlags};
         use std::path::Path;
 
         /* mount new fs */
@@ -72,15 +105,6 @@ impl Container {
         /* mount essential fs */
         self.mount_essential_fs();
         println!("[Container]: Success on fs mount");
-
-        /* Mount base current root fs and container fs to process filesys */
-        // mount(
-        //     None::<&str>,
-        //     ".",
-        //     None::<&str>,
-        //     MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-        //     None::<&str>
-        // ).expect("Could not mount base filesys");
 
         /* bind process' vision of OS */
         nix::unistd::chroot(".")?;
