@@ -1,7 +1,7 @@
 use std::ffi::CString;
 
-use nix::{sched::CloneFlags, sys::stat::{mknod, Mode, SFlag}, unistd::ForkResult};
-use crate::{cgroups::{CgroupManager}, ActionResult};
+use nix::{sched::CloneFlags, unistd::ForkResult};
+use crate::{cgroups::CgroupManager, ActionResult};
 
 #[derive(Debug)]
 pub struct ContainerConfig {
@@ -22,39 +22,23 @@ impl Container {
     /// Create child container proccess
     ///
     pub fn run(&self) {
-        // 1. SETUP CGROUP (IN PARENT, BEFORE FORK)
-        // Use a unique ID for the container, e.g., a UUID or a name.
-        let container_id = "container-123";
-        let cgroups = CgroupManager::new(container_id);
+        let cgroup_manager = CgroupManager::new("woody_container");
+        cgroup_manager.create().expect("Could not create cgroup");
+        cgroup_manager.enable_controllers().expect("Could not enable controllers");
+        cgroup_manager.set_memory_limit(512 * 1024 * 1024).expect("Could not set memory limit");
+        cgroup_manager.set_pid_limit(1024).expect("Could not set pid limit");
 
-        // Create the parent cgroup directory and enable controllers first.
-        // These might fail if they already exist, so you might want to handle that.
-        std::fs::create_dir_all("/sys/fs/cgroup/woody").ok();
-        cgroups.enable_controllers().expect("Failed to enable cgroup controllers");
-
-        // Now create the container-specific cgroup and set its limits.
-        cgroups.create().expect("Could not create Cgroup folder");
-        println!("[Parent] Cgroup created at: {}", cgroups.cgroup_path);
-
-        // Set a 50MB memory limit and 100 process limit
-        cgroups.set_memory_limit(50 * 1024 * 1024).expect("Could not set memory_limit");
-        cgroups.set_pid_limit(100).expect("Could not set pid_limit");
         println!("[Parent] Cgroup limits set.");
 
         match unsafe { nix::unistd::fork().expect("Error forking new child process") } {
             ForkResult::Parent { child } => {
-                let cgroups = CgroupManager::new(&std::process::id().to_string());
-                cgroups.create().expect("Could not create Cgroup folder");
-                cgroups.set_memory_limit(200).expect("Could not set mem_limit");
+                cgroup_manager.add_process(child).expect("Could not add child to cgroup");
 
                 nix::sys::wait::waitpid(child, None).expect("Error waiting for child");
+
+                cgroup_manager.destroy().expect("Could not destroy cgroup");
             }
             ForkResult::Child => {
-                 let pid = nix::unistd::getpid();
-                println!("[Child] My PID is {}. Adding myself to the cgroup.", pid);
-                cgroups.add_process(pid).expect("Child failed to join cgroup");
-
-                // 4. CHILD CONTINUES SETUP AND EXECUTES COMMAND
                 println!("[Child] Cgroup joined. Setting up container environment...");
 
                 self.setup_container();
@@ -63,15 +47,13 @@ impl Container {
             }
         }
     }
-}
 
-impl Container {
+
     /// Unshare, setup fs and hostname for newly decoupled process
     ///
     fn setup_container(&self) {
         /* ensure new process is completely isolated */
-        let flags = CloneFlags::CLONE_NEWPID
-                                | CloneFlags::CLONE_NEWNS
+        let flags = CloneFlags::CLONE_NEWNS
                                 | CloneFlags::CLONE_NEWUTS
                                 | CloneFlags::CLONE_NEWIPC
                                 | CloneFlags::CLONE_NEWNET;
@@ -116,6 +98,14 @@ impl Container {
     }
 
     fn exec_command(&self) {
+        use std::fs::File;
+        use std::os::unix::io::AsRawFd;
+
+        // let dev_null = File::open("/dev/null").unwrap();
+        // nix::unistd::dup2(dev_null.as_raw_fd(), 0).unwrap(); // stdin
+        // nix::unistd::dup2(dev_null.as_raw_fd(), 1).unwrap(); // stdout
+        // nix::unistd::dup2(dev_null.as_raw_fd(), 2).unwrap(); // stderr
+
         let program = CString::new(self.config.command[0].clone()).unwrap();
         let mut args: Vec<CString> = vec![program.clone()]; 
 
@@ -132,6 +122,7 @@ impl Container {
 
     fn mount_essential_fs(&self) {
         use nix::mount::{mount, MsFlags};
+        use nix::sys::stat::{mknod, Mode, SFlag};
         use std::fs::{create_dir_all as cd};
 
         
@@ -152,8 +143,6 @@ impl Container {
         for dir in dirs {
             cd(dir).expect("Could not create essential dir [{dir}]");
         };
-
-        let mount_flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
 
         // proc
         mount(
@@ -181,6 +170,13 @@ impl Container {
             MsFlags::empty(),
             Some("mode=0755,size=65536k")
         ).expect("Could not mount dev");
+
+        mknod(
+            "./dev/null",
+            SFlag::S_IFCHR,
+            Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IWGRP | Mode::S_IROTH | Mode::S_IWOTH,
+            nix::sys::stat::makedev(1, 3),
+        ).expect("Could not create /dev/null");
 
         // tmp
         mount(
@@ -264,40 +260,7 @@ impl Container {
             "./dev/shm",
             Some("tmpfs"),
             MsFlags::empty(), // Add NOEXEC for security
-            Some("mode=1777") // 64M size limit
+            Some("size=64m,mode=1777") // 64M size limit
         ).expect("Could not mount /dev/shm tmpfs");
-
-        // /dev/null: The black hole.
-        // Major: 1, Minor: 3
-        mknod(
-            "/dev/null",
-            SFlag::S_IFCHR, // S_IFCHR indicates a character device
-            Mode::from_bits(0o666).unwrap(),
-            nix::sys::stat::makedev(1, 3),
-        ).expect("z");
-
-        // /dev/zero: Provides an infinite stream of null bytes.
-        // Major: 1, Minor: 5
-        mknod(
-            "/dev/zero",
-            SFlag::S_IFCHR,
-            Mode::from_bits(0o666).unwrap(),
-            nix::sys::stat::makedev(1, 5),
-        ).expect("N");
-
-        // /dev/tty: The process's controlling terminal.
-        // Major: 5, Minor: 0
-        mknod(
-            "/dev/tty",
-            SFlag::S_IFCHR,
-            Mode::from_bits(0o666).unwrap(),
-            nix::sys::stat::makedev(5, 0),
-        ).expect("m");
-
-        // /dev/random and /dev/urandom
-        mknod("/dev/random", SFlag::S_IFCHR, Mode::from_bits(0o666).unwrap(), nix::sys::stat::makedev(1, 8)).expect("n");
-        mknod("/dev/urandom", SFlag::S_IFCHR, Mode::from_bits(0o666).unwrap(), nix::sys::stat::makedev(1, 9)).expect("u");
-        
-        println!("[Child] Device nodes created.");
     }
 }
