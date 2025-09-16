@@ -10,7 +10,7 @@ pub type ActionResult = Result<(), Box<dyn std::error::Error>>;
 fn main() {
     let config = ContainerConfig {
         command: vec!["/bin/bash".to_string()],
-        args: vec![], // vec!["-la".to_string()],
+        args: vec![],
         rootfs: "./container/".to_string(),
     };
 
