@@ -19,7 +19,7 @@ impl Container {
         Container { config }
     }
 
-    /// Create child container proccess
+    /// Create / Await child container proccess
     ///
     pub fn run(&self) {
         let cgroup_manager = CgroupManager::new("woody_container");
@@ -98,14 +98,6 @@ impl Container {
     }
 
     fn exec_command(&self) {
-        use std::fs::File;
-        use std::os::unix::io::AsRawFd;
-
-        // let dev_null = File::open("/dev/null").unwrap();
-        // nix::unistd::dup2(dev_null.as_raw_fd(), 0).unwrap(); // stdin
-        // nix::unistd::dup2(dev_null.as_raw_fd(), 1).unwrap(); // stdout
-        // nix::unistd::dup2(dev_null.as_raw_fd(), 2).unwrap(); // stderr
-
         let program = CString::new(self.config.command[0].clone()).unwrap();
         let mut args: Vec<CString> = vec![program.clone()]; 
 
