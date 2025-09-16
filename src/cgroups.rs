@@ -24,7 +24,8 @@ impl CgroupManager {
         // You enable controllers from the parent directory.
         // NOTE: This assumes "/sys/fs/cgroup/woody" already exists.
         // Your setup script might need to run `mkdir /sys/fs/cgroup/woody` once.
-        let subtree_path = "/sys/fs/cgroup/woody/cgroup.subtree_control";
+        let subtree_path = std::path::Path::new(&self.cgroup_path).parent().unwrap().join("cgroup.subtree_control");
+
         // The `+` enables the controller for child cgroups.
         std::fs::write(subtree_path, "+pids +memory")?;
         Ok(())
@@ -48,6 +49,7 @@ impl CgroupManager {
 
     pub fn add_process(&self, pid: nix::unistd::Pid) -> ActionResult {
         let procs_path = format!("{}/cgroup.procs", self.cgroup_path);
+
         let mut file = std::fs::File::create(procs_path)?;
         file.write_all(pid.to_string().as_bytes())?;
 
