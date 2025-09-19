@@ -1,6 +1,7 @@
 use std::ffi::CString;
 
 use nix::{sched::CloneFlags, unistd::ForkResult};
+#[allow(unused)]
 use crate::{cgroups::CgroupManager, ActionResult};
 
 #[derive(Debug)]
