@@ -131,6 +131,7 @@ impl Container {
             "./usr/lib64",
             "./lib",
             "./lib64",
+            "./etc"
         ];
 
         for dir in dirs {
@@ -230,6 +231,14 @@ impl Container {
             MsFlags::MS_BIND,
             None::<&str>
         ).expect("Could not mount usr/lib64");
+
+        mount(
+            Some("/etc"),
+            "./etc",
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>
+        ).expect("Could not mount lib");
 
         let dev_internals = vec!["./dev/pts", "./dev/shm"];
         dev_internals
