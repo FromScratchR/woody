@@ -23,25 +23,11 @@ impl Container {
     /// Create / Await child container proccess
     ///
     pub fn run(&self) {
-        // let cgroup_manager = CgroupManager::new("woody_container");
-        // cgroup_manager.create().expect("Could not create cgroup");
-        // cgroup_manager.enable_controllers().expect("Could not enable controllers");
-        // cgroup_manager.set_memory_limit(512 * 1024 * 1024).expect("Could not set memory limit");
-        // cgroup_manager.set_pid_limit(1024).expect("Could not set pid limit");
-
-        // println!("[Parent] Cgroup limits set.");
-
         match unsafe { nix::unistd::fork().expect("Error forking new child process") } {
             ForkResult::Parent { child } => {
-                // cgroup_manager.add_process(child).expect("Could not add child to cgroup");
-
                 nix::sys::wait::waitpid(child, None).expect("Error waiting for child");
-
-                // cgroup_manager.destroy().expect("Could not destroy cgroup");
             }
             ForkResult::Child => {
-                // println!("[Child] Cgroup joined. Setting up container environment...");
-
                 self.setup_container();
                 self.exec_command();
                 std::process::exit(0);
