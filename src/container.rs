@@ -117,7 +117,6 @@ impl Container {
             "./usr/lib64",
             "./lib",
             "./lib64",
-            "./etc"
         ];
 
         for dir in dirs {
@@ -157,15 +156,6 @@ impl Container {
             Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IRGRP | Mode::S_IWGRP | Mode::S_IROTH | Mode::S_IWOTH,
             nix::sys::stat::makedev(1, 3),
         ).expect("Could not create /dev/null");
-
-        // tmp
-        mount(
-            None::<&str>,
-            "./tmp",
-            Some("tmpfs"),
-            MsFlags::empty(),
-            None::<&str> // Some("size=64m")
-        ).expect("Could not mount tmp");
 
         // bin
         mount(
@@ -217,38 +207,5 @@ impl Container {
             MsFlags::MS_BIND,
             None::<&str>
         ).expect("Could not mount usr/lib64");
-
-        mount(
-            Some("/etc"),
-            "./etc",
-            None::<&str>,
-            MsFlags::MS_BIND,
-            None::<&str>
-        ).expect("Could not mount lib");
-
-        let dev_internals = vec!["./dev/pts", "./dev/shm"];
-        dev_internals
-            .iter()
-            .for_each(|dir|
-                cd(dir).expect("Could not create dev internals")
-            );
-
-        // dev/pts - For pseudo-terminals (like the shell)
-        mount(
-            None::<&str>,
-            "./dev/pts",
-            Some("devpts"),
-            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-            Some("newinstance,ptmxmode=0666,gid=5")
-        ).expect("Could not mount dev/pts");
-        
-        // dev/shm - Crucial for POSIX shared memory
-        mount(
-            None::<&str>,
-            "./dev/shm",
-            Some("tmpfs"),
-            MsFlags::empty(), // Add NOEXEC for security
-            Some("size=64m,mode=1777") // 64M size limit
-        ).expect("Could not mount /dev/shm tmpfs");
     }
 }
