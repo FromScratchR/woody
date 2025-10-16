@@ -1,4 +1,4 @@
-use std::{env, ffi::CString, fs, path::PathBuf};
+use std::{env, ffi::CString, fs, path::PathBuf, process::Command};
 
 use anyhow::{bail, Context};
 use nix::{mount::{mount, MsFlags}, sched::{unshare, CloneFlags}, sys::wait::waitpid, unistd::{execve, fork, pivot_root, sethostname, ForkResult}};
@@ -89,27 +89,12 @@ async fn main() -> anyhow::Result<()> {
     }
     fs::create_dir_all(format!("./woody-image/{}", container_id))?;
 
-    let (manifest, config) = fetch_image_manifest(image_ref).await?;
+    // SECTION image name parsing / token acquisition
 
-    let rootfs_path = format!("./woody-image/{}/rootfs", container_id);
-    fs::create_dir_all(&rootfs_path)?;
-
-    println!("-> Assembling rootfs at: {}", &rootfs_path);
-    download_and_unpack_layers(image_ref, &manifest.layers, &rootfs_path).await?;
-
-    run_container(container_id, config)?;
-
-    Ok(())
-}
-
-async fn fetch_image_manifest(image_ref: &str) -> anyhow::Result<(Manifest, ImageConfig)> {
-    // Version split parsing
-    let (image, tag) = image_ref.split_once(':').unwrap_or((image_ref, "latest"));
-    let image_name = if image.contains('/') { image.to_string() } else { format!("library/{}", image) };
+    let (image_name, tag) = parse_image_name(image_ref);
 
     let client = reqwest::Client::new();
 
-    // Auth token get
     let auth_url = format!(
         "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{}:pull",
         image_name
@@ -122,9 +107,40 @@ async fn fetch_image_manifest(image_ref: &str) -> anyhow::Result<(Manifest, Imag
         .await?
         .token;
 
+    // SECTION
+
+
+    // Get image specification / options before downloading the containers
+    let (manifest, config) = fetch_image_manifest(&image_name, &tag, &token, &client).await?;
+
+    let rootfs_path = format!("./woody-image/{}/rootfs", container_id);
+    fs::create_dir_all(&rootfs_path)?;
+
+    println!("-> Assembling rootfs at: {}", &rootfs_path);
+    download_and_unpack_layers(&image_name, &token, &manifest.layers, &rootfs_path, &client).await?;
+
+    run_container(container_id, config)?;
+
+    Ok(())
+}
+
+fn parse_image_name(image_ref: &str) -> (String, String) {
+    // Image / Tag split parsing
+    let (image, tag) = image_ref.split_once(':').unwrap_or((image_ref, "latest"));
+    let image_name = if image.contains('/') { image.to_string() } else { format!("library/{}", image) };
+
+    (image_name.to_owned(), tag.to_owned())
+}
+
+async fn fetch_image_manifest(
+    image_name: &str,
+    tag: &str,
+    token: &String,
+    client: &reqwest::Client
+) -> anyhow::Result<(Manifest, ImageConfig)> {
     // Manifest get
     let manifest_url = format!("https://registry-1.docker.io/v2/{}/manifests/{}", image_name, tag);
-    
+
     let generic_manifest: GenericManifest = client
         .get(&manifest_url)
         .header("Accept", "application/vnd.docker.distribution.manifest.v2+json")
@@ -143,6 +159,7 @@ async fn fetch_image_manifest(image_ref: &str) -> anyhow::Result<(Manifest, Imag
         }
         GenericManifest::ManifestList(list) => {
             println!("-> Found manifest list. Searching for linux/amd64.");
+
             let amd64_manifest = list.manifests.iter()
             .find(|m| m.platform.os == "linux" && m.platform.architecture == "amd64")
             .context("Could not find linux/amd64 manifest in the list")?;
@@ -170,24 +187,19 @@ async fn fetch_image_manifest(image_ref: &str) -> anyhow::Result<(Manifest, Imag
         .send().await?
         .json().await?;
 
+    #[cfg(feature = "debug-reqs")]
+    dbg!(config);
+
     Ok((final_manifest, config))
 }
 
-async fn download_and_unpack_layers(image_ref: &str, layers: &[Digest], rootfs_path: &str) -> anyhow::Result<()> {
-    let (image, _) = image_ref.split_once(':').unwrap_or((image_ref, "latest"));
-    let image_name = if image.contains('/') { image.to_string() } else { format!("library/{}", image) };
-
-    let client = reqwest::Client::new();
-    let auth_url = format!(
-        "https://auth.docker.io/token?service=registry.docker.io&scope=repository:{}:pull",
-        image_name
-    );
-    let token = client
-        .get(&auth_url)
-        .send().await?
-        .json::<AuthResponse>().await?
-        .token;
-
+async fn download_and_unpack_layers(
+    image_name: &str,
+    token: &String,
+    layers: &[Digest],
+    rootfs_path: &str,
+    client: &reqwest::Client
+) -> anyhow::Result<()> {
     for layer in layers {
         println!("   - Downloading layer {}", &layer.digest[..12]);
         let layer_url = format!("https://registry-1.docker.io/v2/{}/blobs/{}", image_name, layer.digest);
@@ -201,13 +213,52 @@ async fn download_and_unpack_layers(image_ref: &str, layers: &[Digest], rootfs_p
         let tar = flate2::read::GzDecoder::new(&response_bytes[..]);
         let mut archive = tar::Archive::new(tar);
 
-        archive.unpack(rootfs_path)?
+        archive.unpack(rootfs_path)?;
     }
 
     Ok(())
 }
 
 fn run_container(container_id: &str, config: ImageConfig) -> anyhow::Result<()> {
+    if !nix::unistd::geteuid().is_root() {
+        bail!("You must run this program as root. Try with sudo.");
+    }
+
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child, .. }) => {
+            println!("-> Container PID from Parent: {}", child);
+
+            let pid = child.to_string();
+            println!("[PARENT] Waiting for child {}...", pid);
+
+            let status = waitpid(child, None)?;
+            println!("-> Container exited with status: {:?}", status);
+        }
+        Ok(ForkResult::Child) => {
+            let flags = CloneFlags::CLONE_NEWNS |
+                        CloneFlags::CLONE_NEWUTS |
+                        CloneFlags::CLONE_NEWIPC |
+                        CloneFlags::CLONE_NEWNET;
+
+            unshare(flags).context("Failed to unshare namespaces")?;
+
+            mount_fs(container_id, &config).context("Could not mount fs.")?;
+
+            sethostname("woody-image").context("Failed to set hostname.")?;
+
+            exec_command(config).context("Failed to exec command.")?;
+
+        }
+        Err(e) => {
+            bail!("Fork failed: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+
+fn mount_fs(container_id: &str, config: &ImageConfig) -> anyhow::Result<()> {
     // OverlayFS integration
     let container_root = PathBuf::from(format!("./woody-image/{}", container_id));
     let rootfs = container_root.join("rootfs");
@@ -217,119 +268,90 @@ fn run_container(container_id: &str, config: ImageConfig) -> anyhow::Result<()> 
     fs::create_dir_all(&upperdir)?;
     fs::create_dir_all(&workdir)?;
     fs::create_dir_all(&merged)?;
+    println!("[Container] Created overlayFS dirs.");
 
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { child, .. }) => {
-            println!("-> Container PID: {}", child);
-            let status = waitpid(child, None)?;
-            println!("-> Container exited with status: {:?}", status);
-        }
-        Ok(ForkResult::Child) => {
-            unshare(
-                // CloneFlags::CLONE_NEWPID |
-                       CloneFlags::CLONE_NEWNS |
-                       CloneFlags::CLONE_NEWUTS |
-                       CloneFlags::CLONE_NEWNET
-            ).context("Failed to unshare namespaces")?;
+    
+    std::env::set_current_dir(&rootfs)?;
+    println!("[Container] Initializing container on: {:?}", std::env::current_dir().unwrap());
 
-            sethostname("woody-image")?;
+    // mount(
+    //     None::<&str>,
+    //     "/",
+    //     None::<&str>,
+    //     MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+    //     None::<&str>,
+    // ).context("Failed to make root mount private")?;
 
-            let mount_opts = format!(
-                "lowerdir={},upperdir={},workdir={}",
-                rootfs.to_str().unwrap(),
-                upperdir.to_str().unwrap(),
-                workdir.to_str().unwrap(),
-            );
+    let mount_opts = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        rootfs.to_str().unwrap(),
+        upperdir.to_str().unwrap(),
+        workdir.to_str().unwrap(),
+    );
 
-            mount(
-                Some("overlay"),
-                &merged,
-                Some("overlay"),
-                MsFlags::empty(),
-                Some(mount_opts.as_str())
-            ).context("Failed to mount overlayfs")?;
+    // Use merge dir as hub for upper and lower dirs
+    mount(
+        Some("overlay"),
+        &merged,
+        Some("overlay"),
+        MsFlags::empty(),
+        Some(mount_opts.as_str())
+    ).context("Failed to mount overlayfs")?;
 
-            // Use pivot_root to make the new `merged` directory the new root
-            let old_root = merged.join("old_root");
-            fs::create_dir_all(&old_root)?;
-            pivot_root(&merged, &old_root).context("Failed to pivot_root")?;
-            env::set_current_dir("/")?;
-            nix::mount::umount2("/old_root", nix::mount::MntFlags::MNT_DETACH)?;
-            fs::remove_dir("/old_root")?;
+    nix::unistd::chroot(".")?;
+    println!("[Container] Root changed.");
 
-            mount(
-                Some("proc"),
-                "/proc",
-                Some("proc"),
-                MsFlags::empty(),
-                None::<&str>,
-            )?;
-
-            mount(
-                Some("sysfs"),
-                "/sys",
-                Some("sysfs"),
-                MsFlags::empty(),
-                None::<&str>,
-            )?;
-
-            mount(
-                Some("tmpfs"),
-                "/dev",
-                Some("tmpfs"),
-                MsFlags::empty(),
-                None::<&str>,
-            )?;
-
-            let work_dir = &config.config.working_dir;
-            if !work_dir.is_empty() {
-                env::set_current_dir(work_dir).context(format!("Failed to change to working directory: {}", work_dir))?;
-            }
-
-            let cmd = config.config.cmd.unwrap_or_default();
-            let entrypoint = config.config.entrypoint.unwrap_or_default();
-
-            let (command, args) = if !entrypoint.is_empty() {
-                (entrypoint[0].clone(), entrypoint)
-            } else if !cmd.is_empty() {
-                (cmd[0].clone(), cmd)
-            } else {
-                bail!("Image has no entrypoint or command specified");
-            };
-
-            let command_c = CString::new(command)?;
-            let args_c: Vec<CString> = args.iter()
-                .map(|s| CString::new(s.as_bytes()).unwrap())
-                .collect();
-            let env_c: Vec<CString> = config.config.env.iter()
-                .map(|s| CString::new(s.as_bytes()).unwrap())
-                .collect();
-
-            // let command = config.config.cmd[0].clone();
-            // let args: Vec<CString> = config.config.cmd.iter()
-            //     .map(|s| CString::new(s.as_bytes()).unwrap())
-            //     .collect();
-            // let envs: Vec<CString> = config.config.env.iter()
-            //     .map(|s| CString::new(s.as_bytes()).unwrap())
-            //     .collect();
-
-            println!("-> Executing command: {:?}", &args);
-            execve(&command_c, &args_c, &env_c)
-                .expect("execve failed.");
-        }
-        Err(e) => {
-            bail!("Fork failed: {}", e);
-        }
+    let work_dir = &config.config.working_dir;
+    if !work_dir.is_empty() {
+        env::set_current_dir(work_dir).context(format!("Failed to change to working directory: {}", work_dir))?;
     }
 
     Ok(())
 }
-// let config = ContainerConfig {
-//     command: vec!["/bin/bash".to_string()],
-//     args: vec![],
-//     rootfs: "./container/".to_string(),
-// };
+
+fn exec_command(config: ImageConfig) -> anyhow::Result<()> {
+    let cmd = config.config.cmd.unwrap_or_default();
+    let entrypoint = config.config.entrypoint.unwrap_or_default();
+
+    let (command, args) = if !entrypoint.is_empty() {
+        (entrypoint[0].clone(), entrypoint)
+    } else if !cmd.is_empty() {
+        (cmd[0].clone(), cmd)
+    } else {
+        bail!("Image has no entrypoint or command specified");
+    };
+
+    let command_c = CString::new(command)?;
+    let args_c: Vec<CString> = args.iter()
+        .map(|s| CString::new(s.as_bytes()).unwrap())
+        .collect();
+    let env_c: Vec<CString> = config.config.env.iter()
+        .map(|s| CString::new(s.as_bytes()).unwrap())
+        .collect();
+
+    dbg!(&command_c);
+    dbg!(&args_c);
+    dbg!(&env_c);
+
+    println!("-> Executing command: {:?}", &args);
+    execve(&command_c, &args_c, &env_c)
+        .expect("execve failed.");
+
+    Ok(())
+}
+
 //
-// let container = Container::new(config);
-// container.run();
+//
+// pub type ActionResult = std::result::Result<(), Box<dyn std::error::Error>>;
+//
+// fn main() {
+//     let config = ContainerConfig {
+//         command: vec!["/bin/bash".to_string()],
+//         args: vec![],
+//         rootfs: "./container/".to_string(),
+//     };
+//
+//     let container = Container::new(config);
+//     container.run();
+// }
 
